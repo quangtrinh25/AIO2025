@@ -1,0 +1,5 @@
+Mortality FOR ICU DATA
+# Admission Records: 94444
+# Patients: 65355
+# Positive cases: 6747
+# Negative cases: 87697
