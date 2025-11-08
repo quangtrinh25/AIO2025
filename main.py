@@ -161,7 +161,7 @@ def main():
     paths = setup_paths(args)
     
     logging.info("\n" + "=" * 70)
-    logging.info("🚀 DRONE SEARCH-AND-RESCUE PIPELINE")
+    logging.info(" DRONE SEARCH-AND-RESCUE PIPELINE")
     logging.info("=" * 70)
     logging.info(f"Dataset root: {paths['train_annotations']}")
     logging.info(f"Output directory: {paths['output_dir']}")
@@ -175,7 +175,7 @@ def main():
     # Step 1: Convert to YOLO format
     # -------------------------
     if not args.skip_training:
-        logging.info("📦 Step 1: Converting dataset to YOLO format...")
+        logging.info(" Step 1: Converting dataset to YOLO format...")
         step1_start = time.time()
         try:
             preprocessor = FewShotDataPreprocessor(
@@ -187,15 +187,15 @@ def main():
             logging.exception(f"Data conversion failed: {e}")
             return
         step1_end = time.time()
-        logging.info(f"✅ Step 1 finished in {step1_end - step1_start:.2f} seconds")
+        logging.info(f" Step 1 finished in {step1_end - step1_start:.2f} seconds")
     else:
-        logging.info("⏭️  Step 1: Skipping data conversion (using existing data)")
+        logging.info("  Step 1: Skipping data conversion (using existing data)")
 
     # -------------------------
     # Step 2: Train detector
     # -------------------------
     if not args.skip_training:
-        logging.info("\n🎯 Step 2: Training Search-and-Rescue YOLO-NAS model...")
+        logging.info("\n Step 2: Training Search-and-Rescue YOLO-NAS model...")
         step2_start = time.time()
         try:
             trainer = SearchAndRescueTrainer(config_path=paths['config_file'])
@@ -206,7 +206,7 @@ def main():
             logging.exception(f"Training error: {e}")
             return
         step2_end = time.time()
-        logging.info(f"✅ Step 2 finished in {step2_end - step2_start:.2f} seconds")
+        logging.info(f" Step 2 finished in {step2_end - step2_start:.2f} seconds")
     else:
         if args.model_path:
             model_path = args.model_path
@@ -216,12 +216,12 @@ def main():
             if not os.path.exists(model_path):
                 logging.error(f"Model not found: {model_path}. Please specify with --model_path")
                 return
-        logging.info(f"⏭️  Step 2: Using existing model: {model_path}")
+        logging.info(f"  Step 2: Using existing model: {model_path}")
 
     # -------------------------
     # Step 3: Generate predictions on training set
     # -------------------------
-    logging.info("\n🔍 Step 3: Generating predictions on training set...")
+    logging.info("\n Step 3: Generating predictions on training set...")
     step3_start = time.time()
     try:
         train_predictions_file = os.path.join(paths['predictions_dir'], 'train_predictions.json')
@@ -236,12 +236,12 @@ def main():
         logging.exception(f"Error during train-set prediction: {e}")
         return
     step3_end = time.time()
-    logging.info(f"✅ Step 3 finished in {step3_end - step3_start:.2f} seconds")
+    logging.info(f" Step 3 finished in {step3_end - step3_start:.2f} seconds")
 
     # -------------------------
     # Step 4: Calculate metrics on training set
     # -------------------------
-    logging.info("\n📊 Step 4: Calculating metrics on training set...")
+    logging.info("\n Step 4: Calculating metrics on training set...")
     step4_start = time.time()
     try:
         if not os.path.exists(train_predictions_file):
@@ -261,12 +261,12 @@ def main():
     except Exception as e:
         logging.exception(f"Error calculating metrics: {e}")
     step4_end = time.time()
-    logging.info(f"✅ Step 4 finished in {step4_end - step4_start:.2f} seconds")
+    logging.info(f" Step 4 finished in {step4_end - step4_start:.2f} seconds")
 
     # -------------------------
     # Step 5: Generate predictions on test set
     # -------------------------
-    logging.info("\n🚀 Step 5: Generating predictions on test set...")
+    logging.info("\n Step 5: Generating predictions on test set...")
     step5_start = time.time()
     try:
         test_predictions_file = os.path.join(paths['predictions_dir'], 'test_predictions.json')
@@ -284,21 +284,22 @@ def main():
         logging.exception(f"Error during test-set prediction: {e}")
         return
     step5_end = time.time()
-    logging.info(f"✅ Step 5 finished in {step5_end - step5_start:.2f} seconds")
+    logging.info(f"Step 5 finished in {step5_end - step5_start:.2f} seconds")
 
     # Final summary
     pipeline_end_time = time.time()
     total_duration = pipeline_end_time - pipeline_start_time
     
     logging.info("\n" + "=" * 70)
-    logging.info("🎉 PIPELINE COMPLETE!")
+    logging.info(" PIPELINE COMPLETE!")
     logging.info("=" * 70)
-    logging.info(f"⏱️  Total pipeline duration: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)")
-    logging.info(f"📁 Output directory: {paths['output_dir']}")
-    logging.info(f"📊 Training predictions: {train_predictions_file}")
-    logging.info(f"🚀 Test predictions: {test_predictions_file}")
-    logging.info(f"🤖 Model used: {model_path}")
+    logging.info(f"  Total pipeline duration: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)")
+    logging.info(f" Output directory: {paths['output_dir']}")
+    logging.info(f" Training predictions: {train_predictions_file}")
+    logging.info(f" Test predictions: {test_predictions_file}")
+    logging.info(f" Model used: {model_path}")
     logging.info("=" * 70)
 
 if __name__ == '__main__':
+
     main()
