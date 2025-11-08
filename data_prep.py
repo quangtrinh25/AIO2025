@@ -9,7 +9,7 @@ import yaml
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import time
-import gc  # ✅ thêm để dọn bộ nhớ
+import gc 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -19,6 +19,11 @@ class FewShotDataPreprocessor:
         self.output_root = Path(output_root)
         self.annotations_path = self.dataset_root / "annotations" / "annotations.json"
         
+        # Biến đếm tổng thể
+        self.total_frames_processed = 0
+        self.total_train_samples = 0
+        self.total_val_samples = 0
+    
     def load_annotations(self):
         """Load và parse annotations"""
         with open(self.annotations_path, 'r') as f:
@@ -52,15 +57,21 @@ class FewShotDataPreprocessor:
         
         # Progress bar cho frame extraction
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        pbar = tqdm(total=total_frames, desc=f"Extracting frames {target_video_id}", unit="frame")
+        if total_frames <= 0:
+             logging.warning(f"Could not get frame count for {target_video_id}. Pbar disabled.")
+             pbar = None
+        else:
+            pbar = tqdm(total=total_frames, desc=f"Extracting {target_video_id}", unit="frame", leave=False)
         
         while cap.isOpened():
-            ret, frame = cap.read()
+            try:
+                ret, frame = cap.read()
+            except SystemError as e:
+                logging.error(f"Error reading frame {frame_count} from {target_video_id}: {e}")
+                ret = False # Bỏ qua frame lỗi
+
             if not ret:
                 break
-
-            # ⚙️ Nếu muốn nhẹ hơn, có thể resize
-            # frame = cv2.resize(frame, (640, 360))
 
             if frame_count in frames_with_objects:
                 frames_data.append({
@@ -69,18 +80,18 @@ class FewShotDataPreprocessor:
                     'bboxes': self._get_bboxes_for_frame(video_annotations, frame_count)
                 })
             
-            # ✅ Giải phóng frame sau mỗi vòng lặp
-            del frame
-
+            del frame # Giải phóng frame sau mỗi vòng lặp
             frame_count += 1
-            pbar.update(1)
+            if pbar:
+                pbar.update(1)
         
-        # ✅ Giải phóng tài nguyên video
         cap.release()
-        cv2.destroyAllWindows()
-        gc.collect()  # ✅ Dọn RAM sau khi đọc xong video
+        gc.collect() 
         
-        pbar.close()
+        if pbar:
+            pbar.close()
+        
+        self.total_frames_processed += len(frames_data)
         return frames_data
     
     def _get_bboxes_for_frame(self, video_annotations, frame_number):
@@ -106,10 +117,41 @@ class FewShotDataPreprocessor:
         (self.output_root / "labels/val").mkdir(parents=True, exist_ok=True)
         (self.output_root / "references").mkdir(parents=True, exist_ok=True)
         
-        all_video_data = []
         
-        # Progress bar cho video processing
-        pbar_videos = tqdm(annotations, desc="Processing videos", unit="video")
+        # Chia danh sách các video, không theo các frame
+        train_videos, val_videos = train_test_split(
+            annotations, test_size=1-train_ratio, random_state=42, shuffle=True
+        )
+        
+        logging.info(f"Splitting dataset by video: {len(train_videos)} train videos, {len(val_videos)} val videos.")
+        
+        # 1. Xử lý tập Train
+        self._process_video_split(train_videos, "train")
+        
+        # 2. Xử lý tập Val
+        self._process_video_split(val_videos, "val")
+        
+        # Tạo dataset.yaml
+        self._create_dataset_yaml()
+        
+        end_time = time.time()
+        duration = end_time - start_time
+        
+        logging.info(f"Few-shot dataset created in {duration:.2f} seconds:")
+        logging.info(f"  Total annotated frames: {self.total_frames_processed}")
+        logging.info(f"  Train samples: {self.total_train_samples}")
+        logging.info(f"  Val samples: {self.total_val_samples}")
+        logging.info(f"  Output: {self.output_root}")
+
+    def _process_video_split(self, video_list, split_name):
+        """
+        Hàm trợ giúp mới: Xử lý danh sách video cho một split (train/val)
+        và lưu trực tiếp vào đĩa.
+        """
+        logging.info(f"Processing {split_name} split...")
+        pbar_videos = tqdm(video_list, desc=f"Processing {split_name} videos", unit="video")
+        
+        split_sample_count = 0
         
         for video_ann in pbar_videos:
             video_id = video_ann["video_id"]
@@ -132,52 +174,40 @@ class FewShotDataPreprocessor:
                     if ref_img.suffix.lower() in ['.jpg', '.jpeg', '.png']:
                         shutil.copy2(ref_img, ref_output_dir / ref_img.name)
             
-            # Extract annotated frames
+            # Extract annotated frames (chỉ cho 1 video, nhẹ nhàng)
             frames_data = self.extract_annotated_frames(video_path, video_id)
             
             # Thêm thông tin video
             for frame_data in frames_data:
                 frame_data['video_id'] = video_id
-                frame_data['reference_dir'] = str(ref_output_dir)
             
-            all_video_data.extend(frames_data)
+           
+            # Lưu các frame của video này vào đúng thư mục split
+            self._save_dataset_split(frames_data, split_name)
             
-            # ✅ Giải phóng RAM sau mỗi video
+            split_sample_count += len(frames_data)
+            
+            # Giải phóng RAM ngay sau khi xử lý xong 1 video
             del frames_data
             gc.collect()
         
         pbar_videos.close()
         
-        # Split train/val
-        if len(all_video_data) > 0:
-            train_data, val_data = train_test_split(
-                all_video_data, test_size=1-train_ratio, random_state=42
-            )
+        # Cập nhật biến đếm tổng
+        if split_name == "train":
+            self.total_train_samples = split_sample_count
         else:
-            train_data, val_data = [], []
-        
-        # Lưu dataset với progress bar
-        logging.info("Saving dataset splits...")
-        self._save_dataset_split(train_data, "train")
-        self._save_dataset_split(val_data, "val")
-        
-        # Tạo dataset.yaml
-        self._create_dataset_yaml()
-        
-        end_time = time.time()
-        duration = end_time - start_time
-        
-        logging.info(f"Few-shot dataset created in {duration:.2f} seconds:")
-        logging.info(f"  Total annotated frames: {len(all_video_data)}")
-        logging.info(f"  Train samples: {len(train_data)}")
-        logging.info(f"  Val samples: {len(val_data)}")
-        logging.info(f"  Output: {self.output_root}")
-    
+            self.total_val_samples = split_sample_count
+
     def _save_dataset_split(self, data, split_name):
-        """Lưu dataset split với progress bar"""
-        pbar = tqdm(data, desc=f"Saving {split_name} split", unit="sample")
+        """
+        Hàm này giờ sẽ xử lý một danh sách frame CỦA MỘT VIDEO
+        và lưu chúng vào đĩa.
+        """
+        # (Bạn có thể giữ hoặc bỏ tqdm ở đây. Tôi sẽ bỏ nó
+        # vì chúng ta đã có pbar cho video)
         
-        for i, entry in enumerate(pbar):
+        for entry in data:
             # Lưu image
             img_filename = f"{entry['video_id']}_{entry['frame']:06d}.jpg"
             img_path = self.output_root / "images" / split_name / img_filename
@@ -189,7 +219,6 @@ class FewShotDataPreprocessor:
             
             with open(label_path, 'w') as f:
                 for bbox in entry['bboxes']:
-                    # Convert to YOLO format
                     h, w = entry['image'].shape[:2]
                     x1, y1, x2, y2 = bbox['x1'], bbox['y1'], bbox['x2'], bbox['y2']
                     
@@ -198,7 +227,6 @@ class FewShotDataPreprocessor:
                     bw = (x2 - x1) / w
                     bh = (y2 - y1) / h
                     
-                    # Clamp values
                     cx = max(0.0, min(1.0, cx))
                     cy = max(0.0, min(1.0, cy))
                     bw = max(0.0, min(1.0, bw))
@@ -206,14 +234,9 @@ class FewShotDataPreprocessor:
                     
                     f.write(f"0 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\n")
             
-            # ✅ Giải phóng ảnh đã lưu
+            # Giải phóng ảnh ngay sau khi lưu
             del entry['image']
-            gc.collect()
-            
-            pbar.set_postfix({"current": entry['video_id']})
         
-        pbar.close()
-    
     def _create_dataset_yaml(self):
         """Tạo file cấu hình dataset"""
         dataset_yaml = {
