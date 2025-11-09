@@ -1,4 +1,3 @@
-# train.py
 import os
 import logging
 import yaml
@@ -10,6 +9,10 @@ from super_gradients.training.dataloaders.dataloaders import get_data_loader
 from super_gradients.training.metrics import DetectionMetrics
 from super_gradients.training.losses import PPYoloELoss
 from super_gradients.training.models.detection_models.pp_yolo_e import PPYoloEPostPredictionCallback
+from super_gradients.training.dataloaders.dataloaders import (
+    coco_detection_yolo_format_train,
+    coco_detection_yolo_format_val
+) 
 import torch.nn.functional as F
 from tqdm import tqdm
 import time
@@ -69,29 +72,29 @@ class SearchAndRescueTrainer:
         self._setup_directories()
         
     def _load_config(self, config_path: str) -> dict:
-        """Config tối ưu cho search-and-rescue"""
+        """Load training configuration với error handling tốt hơn"""
         default_config = {
             'data': {
                 'dataset_yaml': 'few_shot_dataset/dataset.yaml',
                 'batch_size': 16,
-                'num_workers': 8,
+                'num_workers': 4,
                 'img_size': 640
             },
             'training': {
-                'epochs': 150,
-                'initial_lr': 0.02,
-                'warmup_epochs': 5,
+                'epochs': 100,
+                'initial_lr': 0.01,
+                'warmup_epochs': 3,
                 'cosine_final_lr_ratio': 0.01,
                 'optimizer': 'AdamW',
                 'weight_decay': 0.0005,
                 'ema': True,
-                'patience': 25
+                'patience': 20
             },
             'model': {
                 'architecture': 'yolo_nas_s',
                 'num_classes': 1,
                 'pretrained_weights': 'coco',
-                'use_reference_attention': True
+                'use_reference_attention': False
             },
             'augmentation': {
                 'mosaic_prob': 0.7,
@@ -114,18 +117,32 @@ class SearchAndRescueTrainer:
             }
         }
         
+        config = default_config.copy()
+        
         if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                user_config = yaml.safe_load(f)
-                for key in default_config:
-                    if key in user_config:
-                        if isinstance(default_config[key], dict):
-                            default_config[key].update(user_config[key])
-            logging.info(f"Loaded config from {config_path}")
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    user_config = yaml.safe_load(f)
+                
+                if user_config:
+                    for key, value in user_config.items():
+                        if key in config and isinstance(config[key], dict) and isinstance(value, dict):
+                            config[key].update(value)
+                        else:
+                            config[key] = value
+                
+                logging.info(f"Loaded config from {config_path}")
+            except Exception as e:
+                logging.error(f"Error loading config from {config_path}: {e}")
+                logging.info("Using default configuration")
         else:
-            logging.info("Using default search-and-rescue configuration")
+            logging.info("Config file not found, using default configuration")
+        
+        if 'augmentation' not in config:
+            config['augmentation'] = default_config['augmentation']
+            logging.info("Added missing augmentation config")
             
-        return default_config
+        return config
 
     def _setup_directories(self):
         """Create necessary directories"""
@@ -146,11 +163,14 @@ class SearchAndRescueTrainer:
             'warmup_initial_lr': self.config['training']['initial_lr'] * 0.1,
             'batch_size': self.config['data']['batch_size'],
             'num_workers': self.config['data']['num_workers'],
-            'criterion': PPYoloELoss(
+            
+            # THÊM DÒNG NÀY - QUAN TRỌNG:
+            'loss': PPYoloELoss(
                 num_classes=self.config['model']['num_classes'],
                 use_static_assigner=True,
                 reg_max=16,
             ),
+            
             'valid_metrics_list': [
                 DetectionMetrics(
                     post_prediction_callback=PPYoloEPostPredictionCallback(
@@ -197,26 +217,37 @@ class SearchAndRescueTrainer:
             
             # Get data loaders với augmentation mạnh cho drone scenarios
             logging.info("Setting up data loaders...")
-            train_loader = get_data_loader(
-                config_name="coco_detection_yolo_format",
+            
+            augmentation_config = self.config.get('augmentation', {})
+            
+            default_augmentation = {
+                'mosaic_prob': 0.0,
+                'mixup_prob': 0.0,
+                'hsv_h': 0.0,
+                'hsv_s': 0.0,
+                'hsv_v': 0.0,
+                'degrees': 0.0,
+                'translate': 0.0,
+                'scale': 0.0,
+                'shear': 0.0,
+                'perspective': 0.0,
+                'flipud': 0.0,
+                'fliplr': 0.0
+            }
+            
+            for key, default_value in default_augmentation.items():
+                if key not in augmentation_config:
+                    augmentation_config[key] = default_value
+                    logging.info(f"Using default augmentation value for {key}: {default_value}")
+            
+            # SỬA LẠI PHẦN NÀY: Thêm dataset_cls và train parameters
+            train_loader = coco_detection_yolo_format_train(
                 dataset_params={
                     'data_dir': os.path.dirname(self.config['data']['dataset_yaml']),
                     'images_dir': 'images/train',
                     'labels_dir': 'labels/train',
                     'classes': ['target_object'],
                     'input_dim': [self.config['data']['img_size'], self.config['data']['img_size']],
-                    'mosaic_prob': self.config['augmentation']['mosaic_prob'],
-                    'mixup_prob': self.config['augmentation']['mixup_prob'],
-                    'degrees': self.config['augmentation']['degrees'],
-                    'translate': self.config['augmentation']['translate'],
-                    'scale': self.config['augmentation']['scale'],
-                    'shear': self.config['augmentation']['shear'],
-                    'perspective': self.config['augmentation']['perspective'],
-                    'flipud': self.config['augmentation']['flipud'],
-                    'fliplr': self.config['augmentation']['fliplr'],
-                    'hsv_h': self.config['augmentation']['hsv_h'],
-                    'hsv_s': self.config['augmentation']['hsv_s'],
-                    'hsv_v': self.config['augmentation']['hsv_v'],
                 },
                 dataloader_params={
                     'batch_size': self.config['data']['batch_size'],
@@ -225,41 +256,39 @@ class SearchAndRescueTrainer:
                     'pin_memory': True
                 }
             )
-            
-            val_loader = get_data_loader(
-                config_name="coco_detection_yolo_format",
+
+            val_loader = coco_detection_yolo_format_val(
                 dataset_params={
                     'data_dir': os.path.dirname(self.config['data']['dataset_yaml']),
                     'images_dir': 'images/val',
                     'labels_dir': 'labels/val',
                     'classes': ['target_object'],
                     'input_dim': [self.config['data']['img_size'], self.config['data']['img_size']],
-                    'mosaic_prob': 0.0,
-                    'mixup_prob': 0.0,
-                    'degrees': 0.0,
-                    'translate': 0.0,
-                    'scale': 0.0,
-                    'shear': 0.0,
-                    'perspective': 0.0,
-                    'flipud': 0.0,
-                    'fliplr': 0.0,
                 },
                 dataloader_params={
                     'batch_size': self.config['data']['batch_size'],
                     'num_workers': self.config['data']['num_workers'],
                     'shuffle': False,
                     'pin_memory': True
-                }
+                },
             )
             
             # Build model
-            logging.info("Building model...")
-            base_model = models.get(
-                model_name=self.config['model']['architecture'],
-                num_classes=self.config['model']['num_classes'],
-                pretrained_weights=self.config['model']['pretrained_weights']
+            model_path = "yolo_nas_s_coco.pth"  
+            if os.path.exists(model_path):
+                base_model = models.get(
+                    model_name=self.config['model']['architecture'],
+                    num_classes=self.config['model']['num_classes'],
+                    checkpoint_path=model_path  
             )
-            
+                logging.info(f"Loaded model from local: {model_path}")
+            else:
+                base_model = models.get(
+                    model_name=self.config['model']['architecture'],
+                    num_classes=self.config['model']['num_classes'],
+                    pretrained_weights=self.config['model']['pretrained_weights']
+                    
+            )
             # Wrap với reference-aware mechanism nếu được enabled
             if self.config['model']['use_reference_attention']:
                 model = ReferenceAwareDetectionModel(base_model)

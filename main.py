@@ -96,10 +96,17 @@ def setup_paths(args):
     return paths
 
 def create_config_file(config_path: str, yolo_dataset_path: str):
-    """Create the training configuration file"""
+    """Create the training configuration file - ĐÃ SỬA LỖI YAML"""
+    # Sử dụng raw string và normal string để tránh lỗi escape characters
+    dataset_yaml_path = os.path.join(yolo_dataset_path, 'dataset.yaml')
+    
+    # Sử dụng raw string cho đường dẫn Windows
+    if os.name == 'nt':  # Windows
+        dataset_yaml_path = dataset_yaml_path.replace('\\', '/')
+    
     config_content = f"""# search_rescue_config.yaml
 data:
-  dataset_yaml: "{os.path.join(yolo_dataset_path, 'dataset.yaml')}"
+  dataset_yaml: "{dataset_yaml_path}"
   batch_size: 16
   num_workers: 4
   img_size: 640
@@ -139,9 +146,58 @@ checkpoint:
   experiment_name: "drone_search_rescue"
   save_interval: 10
 """
-    with open(config_path, 'w') as f:
+    with open(config_path, 'w', encoding='utf-8') as f:
         f.write(config_content)
     logging.info(f"Created config file: {config_path}")
+    
+    # Verify the config file can be loaded
+    try:
+        import yaml
+        with open(config_path, 'r', encoding='utf-8') as f:
+            yaml.safe_load(f)
+        logging.info("Config file validation: SUCCESS")
+    except Exception as e:
+        logging.error(f"Config file validation failed: {e}")
+        # Create a minimal safe config as fallback
+        create_minimal_safe_config(config_path, yolo_dataset_path)
+
+def create_minimal_safe_config(config_path: str, yolo_dataset_path: str):
+    """Tạo config file đơn giản, an toàn để tránh lỗi YAML"""
+    safe_config = {
+        'data': {
+            'dataset_yaml': os.path.join(yolo_dataset_path, 'dataset.yaml').replace('\\', '/'),
+            'batch_size': 8,
+            'num_workers': 2,
+            'img_size': 640
+        },
+        'training': {
+            'epochs': 50,
+            'initial_lr': 0.01,
+            'warmup_epochs': 3,
+            'cosine_final_lr_ratio': 0.01,
+            'optimizer': 'AdamW',
+            'weight_decay': 0.0005,
+            'ema': True,
+            'patience': 15
+        },
+        'model': {
+            'architecture': 'yolo_nas_s',
+            'num_classes': 1,
+            'pretrained_weights': 'coco',
+            'use_reference_attention': False
+        },
+        'checkpoint': {
+            'save_dir': 'search_rescue_checkpoints',
+            'experiment_name': 'drone_search_rescue',
+            'save_interval': 10
+        }
+    }
+    
+    import yaml
+    with open(config_path, 'w', encoding='utf-8') as f:
+        yaml.dump(safe_config, f, default_flow_style=False, allow_unicode=True)
+    
+    logging.info(f"Created minimal safe config file: {config_path}")
 
 def main():
     parser = argparse.ArgumentParser(description='Drone Search-and-Rescue Pipeline')
@@ -171,7 +227,7 @@ def main():
     # Create config file
     create_config_file(paths['config_file'], paths['yolo_format_path'])
 
-    # -------------------------
+    '''# -------------------------
     # Step 1: Convert to YOLO format
     # -------------------------
     if not args.skip_training:
@@ -190,7 +246,7 @@ def main():
         logging.info(f" Step 1 finished in {step1_end - step1_start:.2f} seconds")
     else:
         logging.info("  Step 1: Skipping data conversion (using existing data)")
-
+    '''
     # -------------------------
     # Step 2: Train detector
     # -------------------------
