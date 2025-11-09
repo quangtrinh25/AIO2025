@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 try:
     from data_prep import FewShotDataPreprocessor
     from train import SearchAndRescueTrainer
-    from inferences import process_all_videos
+    from inferences import ReferenceGuidedInference
     from metrics import calculate_final_score, calculate_detection_metrics, print_detailed_metrics
 except ImportError as e:
     logging.error(f"Import error: {e}")
@@ -40,21 +40,21 @@ def setup_paths(args):
         TRAIN_SAMPLES = os.path.join(BASE_DIR, "samples")
     else:
         # Fallback to your original structure
-        BASE_DIR = r'D:/zalo_ai'
-        TRAIN_ANNOTATIONS = r'D:/zalo_ai/observing/train/annotations'
-        TRAIN_SAMPLES = r'D:/zalo_ai/observing/train/samples'
+        BASE_DIR = r'C:/zalo_ai'
+        TRAIN_ANNOTATIONS = r'C:/zalo_ai/observing/train/annotations'
+        TRAIN_SAMPLES = r'C:/zalo_ai/observing/train/samples'
     
     # Test samples
     if args.test_dir:
         TEST_SAMPLES = args.test_dir
     else:
-        TEST_SAMPLES = r'D:/zalo_ai/public_test/samples'
+        TEST_SAMPLES = r'C:/zalo_ai/public_test/samples'
     
     # Output directories
     if args.output_dir:
         OUTPUT_DIR = args.output_dir
     else:
-        OUTPUT_DIR = r'D:/zalo_ai/output'
+        OUTPUT_DIR = r'C:/zalo_ai/output'
     
     YOLO_FORMAT_PATH = os.path.join(OUTPUT_DIR, 'few_shot_dataset')
     CHECKPOINTS_DIR = os.path.join(OUTPUT_DIR, 'search_rescue_checkpoints')
@@ -95,31 +95,32 @@ def setup_paths(args):
     
     return paths
 
-def create_config_file(config_path: str, yolo_dataset_path: str):
-    """Create the training configuration file - ĐÃ SỬA LỖI YAML"""
-    # Sử dụng raw string và normal string để tránh lỗi escape characters
+def create_config_file(config_path: str, yolo_dataset_path: str, epochs: int = 30, img_size: int = 512, batch_size: int = 8):
+    """Create the training configuration file"""
     dataset_yaml_path = os.path.join(yolo_dataset_path, 'dataset.yaml')
     
-    # Sử dụng raw string cho đường dẫn Windows
-    if os.name == 'nt':  # Windows
+    if os.name == 'nt':
         dataset_yaml_path = dataset_yaml_path.replace('\\', '/')
     
     config_content = f"""# search_rescue_config.yaml
 data:
   dataset_yaml: "{dataset_yaml_path}"
-  batch_size: 16
-  num_workers: 4
-  img_size: 640
+  batch_size: {batch_size}
+  num_workers: 6
+  img_size: {img_size}
 
 training:
-  epochs: 100
+  epochs: {epochs}
   initial_lr: 0.01
   warmup_epochs: 3
   cosine_final_lr_ratio: 0.01
   optimizer: "AdamW"
   weight_decay: 0.0005
   ema: true
-  patience: 20
+  patience: 12
+  gradient_accumulation_steps: 2
+  use_torch_compile: true
+  use_mixed_precision: true
 
 model:
   architecture: "yolo_nas_s"
@@ -128,17 +129,17 @@ model:
   use_reference_attention: false
 
 augmentation:
-  mosaic_prob: 0.7
-  mixup_prob: 0.2
+  mosaic_prob: 0.5
+  mixup_prob: 0.1
   hsv_h: 0.015
   hsv_s: 0.7
   hsv_v: 0.4
-  degrees: 15.0
-  translate: 0.2
-  scale: 0.5
-  shear: 5.0
+  degrees: 10.0
+  translate: 0.15
+  scale: 0.4
+  shear: 4.0
   perspective: 0.0005
-  flipud: 0.3
+  flipud: 0.25
   fliplr: 0.5
 
 checkpoint:
@@ -159,26 +160,29 @@ checkpoint:
     except Exception as e:
         logging.error(f"Config file validation failed: {e}")
         # Create a minimal safe config as fallback
-        create_minimal_safe_config(config_path, yolo_dataset_path)
+        create_minimal_safe_config(config_path, yolo_dataset_path, epochs, img_size, batch_size)
 
-def create_minimal_safe_config(config_path: str, yolo_dataset_path: str):
+def create_minimal_safe_config(config_path: str, yolo_dataset_path: str, epochs: int = 30, img_size: int = 512, batch_size: int = 8):
     """Tạo config file đơn giản, an toàn để tránh lỗi YAML"""
     safe_config = {
         'data': {
             'dataset_yaml': os.path.join(yolo_dataset_path, 'dataset.yaml').replace('\\', '/'),
-            'batch_size': 8,
-            'num_workers': 2,
-            'img_size': 640
+            'batch_size': batch_size,
+            'num_workers': 4,
+            'img_size': img_size
         },
         'training': {
-            'epochs': 50,
+            'epochs': epochs,
             'initial_lr': 0.01,
             'warmup_epochs': 3,
             'cosine_final_lr_ratio': 0.01,
             'optimizer': 'AdamW',
             'weight_decay': 0.0005,
             'ema': True,
-            'patience': 15
+            'patience': 12,
+            'gradient_accumulation_steps': 2,
+            'use_torch_compile': True,
+            'use_mixed_precision': True
         },
         'model': {
             'architecture': 'yolo_nas_s',
@@ -206,9 +210,14 @@ def main():
     parser.add_argument('--output_dir', type=str, help='Output directory for results')
     parser.add_argument('--skip_training', action='store_true', help='Skip training and use existing model')
     parser.add_argument('--model_path', type=str, help='Path to existing model for inference')
-    parser.add_argument('--similarity_threshold', type=float, default=0.6, help='Similarity threshold for reference matching')
+    parser.add_argument('--similarity_threshold', type=float, default=0.4, help='Similarity threshold for reference matching')
     parser.add_argument('--iou_threshold', type=float, default=0.5, help='IoU threshold for evaluation')
-    
+    parser.add_argument('--resume', type=str, default=None, help='Resume from checkpoint (e.g. ckpt_epoch_30.pth, ckpt_latest.pth)')
+    parser.add_argument('--save_debug_videos', action='store_true', help='Save debug videos with drawn detections')
+    parser.add_argument('--max_frames_per_video', type=int, default=None, help='Limit frames per video during inference for quick debug')
+    parser.add_argument('--epochs', type=int, default=30, help='Number of training epochs to write into config')
+    parser.add_argument('--img_size', type=int, default=512, help='Image size to write into config')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size to write into config')
     args = parser.parse_args()
     
     pipeline_start_time = time.time()
@@ -224,19 +233,21 @@ def main():
     logging.info(f"Skip training: {args.skip_training}")
     logging.info("=" * 70 + "\n")
 
-    # Create config file
-    create_config_file(paths['config_file'], paths['yolo_format_path'])
+    # Create config file (with fast defaults tuned for RTX 4060 Ti)
+    create_config_file(paths['config_file'], paths['yolo_format_path'], epochs=args.epochs, img_size=args.img_size, batch_size=args.batch_size)
 
-    '''# -------------------------
-    # Step 1: Convert to YOLO format
+    # -------------------------
+    # Step 1: Convert to YOLO format (optional)
     # -------------------------
     if not args.skip_training:
         logging.info(" Step 1: Converting dataset to YOLO format...")
         step1_start = time.time()
         try:
             preprocessor = FewShotDataPreprocessor(
-                dataset_root=os.path.dirname(paths['train_annotations']),  # Parent directory of annotations
-                output_root=paths['yolo_format_path']
+                dataset_root=os.path.dirname(paths['train_annotations']),
+                output_root=paths['yolo_format_path'],
+                resize_images=False,  # keep original resolution; change to True if you want resize
+                resize_size=(args.img_size, args.img_size)
             )
             preprocessor.create_few_shot_dataset(train_ratio=0.8)
         except Exception as e:
@@ -246,7 +257,7 @@ def main():
         logging.info(f" Step 1 finished in {step1_end - step1_start:.2f} seconds")
     else:
         logging.info("  Step 1: Skipping data conversion (using existing data)")
-    '''
+
     # -------------------------
     # Step 2: Train detector
     # -------------------------
@@ -255,7 +266,7 @@ def main():
         step2_start = time.time()
         try:
             trainer = SearchAndRescueTrainer(config_path=paths['config_file'])
-            trainer.train()
+            trainer.train(resume_checkpoint=args.resume)
             # The model will be saved in checkpoints_dir automatically
             model_path = os.path.join(paths['checkpoints_dir'], 'drone_search_rescue', 'ckpt_best.pth')
         except Exception as e:
@@ -273,6 +284,18 @@ def main():
                 logging.error(f"Model not found: {model_path}. Please specify with --model_path")
                 return
         logging.info(f"  Step 2: Using existing model: {model_path}")
+    
+    # Ensure model exists
+    if not os.path.exists(model_path):
+        logging.error(f"Model path not found: {model_path}")
+        return
+
+    # Instantiate inference engine once (reuse for train/test predictions)
+    inference_engine = ReferenceGuidedInference(
+        model_path=model_path,
+        similarity_threshold=args.similarity_threshold,
+        save_debug_video=args.save_debug_videos
+    )
 
     # -------------------------
     # Step 3: Generate predictions on training set
@@ -282,11 +305,13 @@ def main():
     try:
         train_predictions_file = os.path.join(paths['predictions_dir'], 'train_predictions.json')
         
-        process_all_videos(
+        inference_engine.process_all_videos(
             test_samples_dir=paths['train_samples'],
             model_path=model_path,
             output_json_path=train_predictions_file,
-            similarity_threshold=args.similarity_threshold
+            similarity_threshold=args.similarity_threshold,
+            save_debug_videos=args.save_debug_videos,
+            max_frames_per_video=args.max_frames_per_video
         )
     except Exception as e:
         logging.exception(f"Error during train-set prediction: {e}")
@@ -309,7 +334,9 @@ def main():
         metrics = calculate_detection_metrics(
             train_predictions_file, 
             paths['ground_truth_file'], 
-            iou_threshold=args.iou_threshold
+            iou_threshold=args.iou_threshold,
+            matching_strategy="hungarian",
+            return_per_video=False
         )
         
         print_detailed_metrics(metrics)
@@ -327,11 +354,13 @@ def main():
     try:
         test_predictions_file = os.path.join(paths['predictions_dir'], 'test_predictions.json')
         
-        process_all_videos(
+        inference_engine.process_all_videos(
             test_samples_dir=paths['test_samples'],
             model_path=model_path,
             output_json_path=test_predictions_file,
-            similarity_threshold=args.similarity_threshold
+            similarity_threshold=args.similarity_threshold,
+            save_debug_videos=args.save_debug_videos,
+            max_frames_per_video=args.max_frames_per_video
         )
         
         logging.info(f"Test predictions saved to: {test_predictions_file}")
@@ -357,5 +386,4 @@ def main():
     logging.info("=" * 70)
 
 if __name__ == '__main__':
-
     main()
